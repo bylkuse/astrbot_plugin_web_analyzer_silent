@@ -43,22 +43,6 @@
 /网页分析 https://example.com
 ```
 
-## 配置选项
-
-在 `metadata.yaml` 中可以配置以下参数：
-
-```yaml
-config:
-  # 最大网页内容长度（字符数）
-  max_content_length: 10000
-  # 请求超时时间（秒）
-  request_timeout: 30
-  # 是否启用详细日志
-  verbose_logging: false
-  # LLM配置
-  llm_enabled: true  # 是否启用LLM分析（默认启用）
-```
-
 ## 技术实现
 
 ### 网页内容提取
