@@ -14,7 +14,7 @@ from .analyzer import WebAnalyzer
 from .cache import CacheManager
 
 
-@register("astrbot_plugin_web_analyzer", "Sakura520222", "自动识别网页链接并进行内容分析和总结", "1.2.2", "https://github.com/Sakura520222/astrbot_plugin_web_analyzer")
+@register("astrbot_plugin_web_analyzer", "Sakura520222", "自动识别网页链接并进行内容分析和总结", "1.2.3", "https://github.com/Sakura520222/astrbot_plugin_web_analyzer")
 class WebAnalyzerPlugin(Star):
     """网页分析插件主类"""
     
@@ -140,6 +140,9 @@ class WebAnalyzerPlugin(Star):
             retry_delay=self.retry_delay
         )
         
+        # 添加URL处理标志，用于避免重复处理
+        self.processing_urls = set()
+        
         # 记录配置验证完成
         logger.info("插件配置验证完成")
     
@@ -227,6 +230,33 @@ class WebAnalyzerPlugin(Star):
             logger.info("自动分析功能已禁用")
             return
         
+        # 检查是否为指令调用
+        # 方法1：检查消息是否以/开头
+        message_text = event.message_str.strip()
+        if message_text.startswith('/'):
+            logger.info("检测到指令调用，跳过自动分析")
+            return
+        
+        # 方法2：检查事件是否有command属性（指令调用时会有）
+        if hasattr(event, 'command'):
+            logger.info("检测到command属性，跳过自动分析")
+            return
+        
+        # 方法3：检查原始消息中是否包含指令关键字
+        raw_message = None
+        if hasattr(event, 'raw_message'):
+            raw_message = str(event.raw_message)
+        elif hasattr(event, 'message_obj'):
+            raw_message = str(event.message_obj)
+        
+        if raw_message:
+            # 检查是否包含网页分析相关指令
+            command_keywords = ['网页分析', '/分析', '/总结', '/web', '/analyze']
+            for keyword in command_keywords:
+                if keyword in raw_message:
+                    logger.info(f"检测到指令关键字 {keyword}，跳过自动分析")
+                    return
+        
         # 检查群聊是否在黑名单中（仅群聊消息）
         # 尝试从不同位置获取群聊ID
         group_id = None
@@ -245,8 +275,6 @@ class WebAnalyzerPlugin(Star):
         if group_id and self._is_group_blacklisted(group_id):
             return  # 群聊在黑名单中，静默忽略
             
-        message_text = event.message_str
-        
         # 提取URL
         urls = self.analyzer.extract_urls(message_text)
         if not urls:
@@ -379,17 +407,37 @@ class WebAnalyzerPlugin(Star):
         # 收集所有分析结果
         analysis_results = []
         
-        async with WebAnalyzer(self.max_content_length, self.timeout, self.user_agent, self.proxy, self.retry_count, self.retry_delay) as analyzer:
-            # 使用asyncio.gather并发处理多个URL
-            import asyncio
-            # 创建任务列表
-            tasks = [self._process_single_url(event, url, analyzer) for url in urls]
-            # 并发执行所有任务
-            analysis_results = await asyncio.gather(*tasks)
+        # 过滤掉正在处理的URL，避免重复分析
+        filtered_urls = []
+        for url in urls:
+            if url not in self.processing_urls:
+                filtered_urls.append(url)
+                # 添加到正在处理的集合中
+                self.processing_urls.add(url)
+            else:
+                logger.info(f"URL {url} 正在处理中，跳过重复分析")
         
-        # 发送所有分析结果
-        async for result in self._send_analysis_result(event, analysis_results):
-            yield result
+        # 如果所有URL都正在处理中，直接返回
+        if not filtered_urls:
+            return
+        
+        try:
+            async with WebAnalyzer(self.max_content_length, self.timeout, self.user_agent, self.proxy, self.retry_count, self.retry_delay) as analyzer:
+                # 使用asyncio.gather并发处理多个URL
+                import asyncio
+                # 创建任务列表
+                tasks = [self._process_single_url(event, url, analyzer) for url in filtered_urls]
+                # 并发执行所有任务
+                analysis_results = await asyncio.gather(*tasks)
+            
+            # 发送所有分析结果
+            async for result in self._send_analysis_result(event, analysis_results):
+                yield result
+        finally:
+            # 处理完成后，从集合中移除所有URL
+            for url in filtered_urls:
+                if url in self.processing_urls:
+                    self.processing_urls.remove(url)
     
     async def analyze_with_llm(self, event: AstrMessageEvent, content_data: dict) -> str:
         """调用LLM进行内容分析和总结"""
