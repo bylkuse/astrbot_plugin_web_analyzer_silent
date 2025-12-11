@@ -574,14 +574,6 @@ class WebAnalyzerPlugin(Star):
         if not allowed_urls:
             return  # 没有允许访问的URL，不处理
 
-        # 发送处理提示消息，告知用户正在分析
-        if len(allowed_urls) == 1:
-            yield event.plain_result(f"检测到网页链接，正在分析: {allowed_urls[0]}")
-        else:
-            yield event.plain_result(
-                f"检测到{len(allowed_urls)}个网页链接，正在分析..."
-            )
-
         # 批量处理所有允许访问的URL
         async for result in self._batch_process_urls(event, allowed_urls):
             yield result
@@ -627,20 +619,16 @@ class WebAnalyzerPlugin(Star):
             # 抓取网页HTML内容
             html = await analyzer.fetch_webpage(url)
             if not html:
-                return {
-                    "url": url,
-                    "result": f"❌ 无法抓取网页内容: {url}",
-                    "screenshot": None,
-                }
+                # --- 修改：失败时静默返回 None ---
+                logger.warning(f"无法抓取网页内容: {url}") # 仅在后台记录日志
+                return None
 
             # 从HTML中提取结构化内容
             content_data = analyzer.extract_content(html, url)
             if not content_data:
-                return {
-                    "url": url,
-                    "result": f"❌ 无法解析网页内容: {url}",
-                    "screenshot": None,
-                }
+                # --- 修改：失败时静默返回 None ---
+                logger.warning(f"无法解析网页内容: {url}")
+                return None
 
             # 如果启用了翻译功能，先翻译内容
             if self.enable_translation:
@@ -657,6 +645,10 @@ class WebAnalyzerPlugin(Star):
             else:
                 # 直接调用LLM进行分析
                 analysis_result = await self.analyze_with_llm(event, content_data)
+
+            if not analysis_result:
+                logger.warning(f"分析结果为空，静默跳过: {url}")
+                return None
 
             # 如果启用了特定内容提取，提取额外信息
             specific_content = self._extract_specific_content(html, url)
@@ -727,13 +719,9 @@ class WebAnalyzerPlugin(Star):
 
             return result_data
         except Exception as e:
-            # 捕获所有异常，确保方法始终返回有效结果
+            # --- 修改：捕获异常时只记录日志，返回 None ---
             logger.error(f"处理URL {url} 时出错: {e}")
-            return {
-                "url": url,
-                "result": f"❌ 处理URL时出错: {url}\n错误信息: {str(e)}",
-                "screenshot": None,
-            }
+            return None
 
     async def _batch_process_urls(self, event: AstrMessageEvent, urls: List[str]):
         """批量处理多个URL，实现高效的并发分析
@@ -787,11 +775,15 @@ class WebAnalyzerPlugin(Star):
                     for url in filtered_urls
                 ]
                 # 并发执行所有任务
-                analysis_results = await asyncio.gather(*tasks)
+                raw_results = await asyncio.gather(*tasks)
+                analysis_results = [res for res in raw_results if res is not None]
 
-            # 发送所有分析结果
-            async for result in self._send_analysis_result(event, analysis_results):
-                yield result
+            if analysis_results:
+                # 发送所有分析结果
+                async for result in self._send_analysis_result(event, analysis_results):
+                    yield result
+            else:
+                logger.info("所有URL分析均失败或被忽略，静默退出")
         finally:
             # 无论处理成功还是失败，都要从处理集合中移除URL
             for url in filtered_urls:
@@ -919,7 +911,7 @@ class WebAnalyzerPlugin(Star):
         except Exception as e:
             logger.error(f"LLM分析失败: {e}")
             # 如果LLM分析失败，返回错误信息
-            return f"❌ LLM分析过程中出现错误: {str(e)}"
+            return None
 
     def get_enhanced_analysis(self, content_data: dict) -> str:
         """增强版基础分析 - LLM不可用时的智能回退方案
@@ -1977,11 +1969,12 @@ class WebAnalyzerPlugin(Star):
                         url = result_data["url"]
                         # 根据发送内容类型决定是否发送分析结果文本
                         if self.send_content_type != "screenshot_only":
-                            if len(analysis_results) == 1:
-                                result_text = f"网页分析结果：\n{analysis_result}"
-                            else:
-                                result_text = f"第{i}/{len(analysis_results)}个网页分析结果：\n{analysis_result}"
-                            yield event.plain_result(result_text)
+                            if analysis_result: 
+                                if len(analysis_results) == 1:
+                                    result_text = f"网页分析结果：\n{analysis_result}"
+                                else:
+                                    result_text = f"第{i}/{len(analysis_results)}个网页分析结果：\n{analysis_result}"
+                                yield event.plain_result(result_text)
 
                         # 根据发送内容类型决定是否发送截图
                         if screenshot and self.send_content_type != "analysis_only":
